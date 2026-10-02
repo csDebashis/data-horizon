@@ -1,0 +1,6 @@
+# Editable workspace: all independently installable Python projects.
+-e ./packages/core
+-e ./services/api
+-e ./services/collector
+-e ./services/processor
+-e ./tools/operations

@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "source_image": "sha256:1ee4c0efbe9c5ded05e79abb6c1346c10f85bfb091bd1350e8eff4f61d776795",
+  "source_revision": "9b6712b14e03cdad39ac291e99bc13a2db24f527",
+  "pyspark_version": "3.5.9",
+  "sedona_version": "1.9.1",
+  "jars": [
+    {
+      "name": "com.google.code.findbugs_jsr305-3.0.0.jar",
+      "bytes": 33031,
+      "sha256": "bec0b24dcb23f9670172724826584802b80ae6cbdaba03bdebdef9327b962f6a"
+    },
+    {
+      "name": "commons-logging_commons-logging-1.1.3.jar",
+      "bytes": 62050,
+      "sha256": "70903f6fc82e9908c8da9f20443f61d90f0870a312642991fe8462a0b9391784"
+    },
+    {
+      "name": "org.apache.commons_commons-pool2-2.11.1.jar",
+      "bytes": 145516,
+      "sha256": "ea0505ee7515e58b1ac0e686e4d1a5d9f7d808e251a61bc371aa0595b9963f83"
+    },
+    {
+      "name": "org.apache.hadoop_hadoop-client-api-3.3.4.jar",
+      "bytes": 19458635,
+      "sha256": "e513d71b78086b5caaa439f4402b43e20df01446d56b66084ad419452878701c"
+    },
+    {
+      "name": "org.apache.hadoop_hadoop-client-runtime-3.3.4.jar",
+      "bytes": 30085504,
+      "sha256": "9377a68071137ae5f5c8cdc2ed20d6f904a1df4d06df26b47ed8872a1b0d8d47"
+    },
+    {
+      "name": "org.apache.kafka_kafka-clients-3.4.1.jar",
+      "bytes": 5050443,
+      "sha256": "9d0a9058c8ede79db6e54ae378ed16fe8d1bead2894635a4aa6aa0b7981668c6"
+    },
+    {
+      "name": "org.apache.sedona_sedona-spark-shaded-3.5_2.12-1.9.1.jar",
+      "bytes": 82601139,
+      "sha256": "0ee2a6886d864c7e52d33b1a08208effc89e0778ce03fbe8b35f32e9c235611a"
+    },
+    {
+      "name": "org.apache.spark_spark-sql-kafka-0-10_2.12-3.5.9.jar",
+      "bytes": 432716,
+      "sha256": "fed393dcc3ef70611fe3d4f35ae78a8ea7c55301fd4cdd66c5dc97fcfaa5a00f"
+    },
+    {
+      "name": "org.apache.spark_spark-token-provider-kafka-0-10_2.12-3.5.9.jar",
+      "bytes": 56812,
+      "sha256": "e82612e6070438c5ea48b08c74f367a6d214a390bdf6dcf3ff316dca592ddda5"
+    },
+    {
+      "name": "org.lz4_lz4-java-1.8.0.jar",
+      "bytes": 682804,
+      "sha256": "d74a3334fb35195009b338a951f918203d6bbca3d1d359033dc33edd1cadc9ef"
+    },
+    {
+      "name": "org.slf4j_slf4j-api-2.0.7.jar",
+      "bytes": 63635,
+      "sha256": "5d6298b93a1905c32cda6478808ac14c2d4a47e91535e53c41f7feeb85d946f4"
+    },
+    {
+      "name": "org.xerial.snappy_snappy-java-1.1.10.5.jar",
+      "bytes": 2299797,
+      "sha256": "0f3f1857ed33116583f480b4df5c0218836c47bfbc9c6221c0d73f356decf37b"
+    }
+  ],
+  "total_bytes": 140972082,
+  "coordinates": [
+    "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.9",
+    "org.apache.sedona:sedona-spark-shaded-3.5_2.12:1.9.1"
+  ],
+  "origin_note": "Exact twelve Ivy-resolved JARs inspected in the retained Docker-qualified processor image; only dependency bytes may be exported, never application code or data."
+}

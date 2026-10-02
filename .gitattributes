@@ -1,0 +1,4 @@
+# Preserve captured execution/download bytes across clones and platforms.
+reports/**/*.csv -text
+reports/**/*.xml -text
+frontend/reports/*.xml -text

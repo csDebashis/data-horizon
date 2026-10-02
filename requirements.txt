@@ -1,0 +1,6 @@
+# Runtime dependency aggregate for workspace tooling; service images use own manifests.
+-r packages/core/requirements.txt
+-r services/api/requirements.txt
+-r services/collector/requirements.txt
+-r services/processor/requirements.txt
+-r tools/operations/requirements.txt
