@@ -1,0 +1,9 @@
+routes: ["1", "2", "3", "4", "5", "6"]
+timezone: America/New_York
+poll_seconds: 30
+stale_seconds: 120
+lateness_seconds: 600
+static_url: https://rrgtfsfeeds.s3.amazonaws.com/gtfs_supplemented.zip
+realtime_url: https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs
+alerts_url: https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/camsys%2Fsubway-alerts
+weather_url: https://api.weather.gov/stations/KNYC/observations/latest
