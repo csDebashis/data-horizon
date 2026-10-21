@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-horizon-api"
+version = "0.2.0"
+description = "Data Horizon api project"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "data-horizon-core==0.2.0",
+  "fastapi==0.162.7",
+  "uvicorn==0.54.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.2.0", "pytest-cov==7.1.0", "httpx==0.28.1"]
+
+[project.scripts]
+data-horizon-api = "data_horizon.api:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true
