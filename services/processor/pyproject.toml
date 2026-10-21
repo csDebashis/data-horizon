@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-horizon-processor"
+version = "0.2.0"
+description = "Data Horizon processor project"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "data-horizon-core==0.2.0",
+  "kafka-python==2.2.21",
+  "pyarrow==25.0.1",
+  "numpy==1.26.4",
+  "pandas==2.2.3",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.2.0", "pytest-cov==7.1.0", "httpx==0.28.1"]
+spark = ["pyspark==3.5.9", "apache-sedona==1.9.1", "setuptools==80.9.0"]
+
+[project.scripts]
+data-horizon-processor = "data_horizon.processor:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true
