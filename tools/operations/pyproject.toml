@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-horizon-operations"
+version = "0.2.0"
+description = "Data Horizon operations project"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "data-horizon-core==0.2.0",
+  "data-horizon-api==0.2.0",
+  "data-horizon-collector==0.2.0",
+  "data-horizon-processor==0.2.0",
+  "httpx==0.28.1",
+  "cryptography==50.0.2",
+  "python-dotenv==1.2.4",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.2.0", "pytest-cov==7.1.0", "httpx==0.28.1"]
+
+[project.scripts]
+data-horizon = "data_horizon.cli:main"
+data-horizon-benchmark = "data_horizon.benchmark:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true

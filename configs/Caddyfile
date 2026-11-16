@@ -1,0 +1,21 @@
+{$DOMAIN} {
+    tls {
+        protocols tls1.3
+    }
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+        Strict-Transport-Security "max-age=86400"
+        -Server
+    }
+    @api path /api/*
+    handle @api {
+        reverse_proxy api:8000
+    }
+    handle {
+        reverse_proxy dashboard:8501 {
+            header_up X-Horizon-Client-IP {http.request.remote.host}
+        }
+    }
+}

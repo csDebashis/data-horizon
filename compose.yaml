@@ -1,0 +1,398 @@
+name: data-horizon-${DATA_MODE:-live}
+
+x-app: &app
+  image: ${OPS_IMAGE:-data-horizon-ops:local}
+  build:
+    context: .
+    dockerfile: tools/operations/Dockerfile
+    target: runtime
+  init: true
+  restart: unless-stopped
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ["/tmp:size=128m,mode=1777"]
+  networks: [application, backend]
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: "3"}
+
+x-env: &environment
+  DATA_MODE: ${DATA_MODE:-live}
+  APP_ENV: ${APP_ENV:-development}
+  DATA_DIR: /data
+  SOURCE_CONFIG: ${SOURCE_CONFIG:-/app/configs/nyc.yaml}
+  DATABASE_URL_FILE: /run/secrets/database_url
+  AUTO_INITIALIZE_SCHEMA: "false"
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+
+services:
+  runtime-init:
+    <<: *app
+    user: "0:0"
+    restart: "no"
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    command: [python, scripts/prepare_runtime.py]
+    healthcheck: {disable: true}
+    networks: [backend]
+    volumes:
+      - writer-secrets:/runtime/writer
+      - reader-secrets:/runtime/reader
+      - public-ui-secrets:/runtime/public-ui
+      - service-token-secrets:/runtime/service
+      - migration-secrets:/runtime/migration
+      - postgres-secrets:/runtime/postgres
+      - datasets:/data
+      - prometheus-data:/monitoring
+    mem_limit: 128m
+    cpus: 0.25
+
+  postgres:
+    image: data-horizon-postgres:local
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: horizon
+      POSTGRES_USER: horizon_admin
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      APP_ENV: ${APP_ENV:-development}
+    depends_on:
+      runtime-init: {condition: service_completed_successfully}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-secrets:/run/secrets:ro
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U horizon_admin -d horizon"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt: [no-new-privileges:true]
+    shm_size: 128m
+    mem_limit: 768m
+    cpus: 1
+    logging:
+      options: {max-size: 10m, max-file: "3"}
+
+  kafka:
+    image: apache/kafka:4.2.2
+    restart: unless-stopped
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 24
+      KAFKA_LOG_RETENTION_BYTES: 2147483648
+      KAFKA_LOG_SEGMENT_BYTES: 134217728
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx768m
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+    volumes: [kafka-data:/var/lib/kafka/data]
+    networks: [backend]
+    healthcheck:
+      test: [CMD-SHELL, "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:9092 >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      start_period: 45s
+      retries: 15
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1280m
+    cpus: 1
+    logging:
+      options: {max-size: 10m, max-file: "3"}
+
+  # Optional topic viewer. It has no application credentials or data mounts.
+  kafdrop:
+    image: obsidiandynamics/kafdrop:4.3.1@sha256:22f63776b5ccea972050ea73adf242b3f5a4403a2537b4413c4cc646d3c788d5
+    profiles: [kafdrop]
+    user: "10001:10001"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=128m,mode=1777"]
+    networks: [backend]
+    environment:
+      KAFKA_BROKERCONNECT: kafka:9092
+      SERVER_PORT: "9000"
+      MANAGEMENT_SERVER_PORT: "9000"
+      SERVER_SERVLET_CONTEXTPATH: /
+      JVM_OPTS: -Xms64m -Xmx384m -XX:MaxMetaspaceSize=192m -Djava.io.tmpdir=/tmp
+      CMD_ARGS: >-
+        --topic.createEnabled=false --topic.deleteEnabled=false
+        --message.sendEnabled=false --cors.enabled=false
+        --springdoc.api-docs.enabled=false --springdoc.swagger-ui.enabled=false
+        --management.endpoints.web.exposure.include=health,info
+        --management.endpoint.health.show-details=never --spring.jmx.enabled=false
+    depends_on:
+      kafka: {condition: service_healthy}
+    ports: ["127.0.0.1:${KAFDROP_PORT:-9000}:9000"]
+    healthcheck:
+      # The upstream image includes Bash, but does not promise curl or wget.
+      test:
+        - CMD
+        - bash
+        - -ec
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000;
+          printf 'GET /actuator/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3;
+          IFS= read -r status <&3;
+          [[ "$$status" == *" 200 "* ]]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 8
+    mem_limit: 768m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  # Optional operator console. Remains loopback-only, including on the VM.
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.5.0@sha256:7cda86a33344160309fdb65146332e4da65db81a945614f2fe32e210803f6fd1
+    profiles: [kafka-ui]
+    user: "kafkaui"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: ["/tmp:size=128m,mode=1777"]
+    networks: [backend]
+    environment:
+      KAFKA_CLUSTERS_0_NAME: data-horizon-${DATA_MODE:-live}
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_READONLY: "true"
+      DYNAMIC_CONFIG_ENABLED: "false"
+      MCP_ENABLED: "false"
+      SWAGGER_UI_ENABLED: "false"
+      LOGGING_LEVEL_IO_KAFBAT_UI: INFO
+      JAVA_TOOL_OPTIONS: -Xms64m -Xmx384m -XX:MaxMetaspaceSize=192m
+    depends_on:
+      kafka: {condition: service_healthy}
+    ports: ["127.0.0.1:${KAFKA_UI_PORT:-8082}:8080"]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:8080/actuator/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 8
+    mem_limit: 768m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+
+  database-init:
+    <<: *app
+    restart: "no"
+    command: [python, -m, data_horizon.cli, init-db]
+    environment:
+      <<: *environment
+      AUTO_INITIALIZE_SCHEMA: "true"
+    depends_on:
+      db-roles: {condition: service_completed_successfully}
+    volumes: [migration-secrets:/run/secrets:ro, datasets:/data]
+    healthcheck: {disable: true}
+    mem_limit: 256m
+    cpus: 0.5
+
+  db-roles:
+    image: data-horizon-postgres:local
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    entrypoint: [/bin/sh, /usr/local/bin/ensure-horizon-roles.sh]
+    user: "999:999"
+    restart: "no"
+    read_only: true
+    tmpfs: ["/tmp:size=32m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      POSTGRES_USER: horizon_admin
+      POSTGRES_DB: horizon
+      APP_ENV: ${APP_ENV:-development}
+    depends_on:
+      postgres: {condition: service_healthy}
+    volumes: [postgres-secrets:/run/secrets:ro]
+    networks: [backend]
+    mem_limit: 128m
+    cpus: 0.25
+
+  collector:
+    <<: *app
+    image: ${COLLECTOR_IMAGE:-data-horizon-collector:local}
+    build: {context: ., dockerfile: services/collector/Dockerfile}
+    command: [data-horizon-collector]
+    environment:
+      <<: *environment
+      STATIC_REFRESH_SECONDS: ${STATIC_REFRESH_SECONDS:-3600}
+      STATIC_RETRY_SECONDS: ${STATIC_RETRY_SECONDS:-300}
+    depends_on:
+      database-init: {condition: service_completed_successfully}
+      kafka: {condition: service_healthy}
+    volumes: [writer-secrets:/run/secrets:ro, datasets:/data]
+    healthcheck: {disable: true}
+    mem_limit: 1g
+    cpus: 0.5
+
+  processor:
+    <<: *app
+    image: ${SPARK_IMAGE:-data-horizon-spark:local}
+    build:
+      context: .
+      dockerfile: services/processor/Dockerfile
+    command: [data-horizon-processor]
+    environment:
+      <<: *environment
+      SPARK_MASTER: local[2]
+      SPARK_DRIVER_MEMORY: 4g
+      SPARK_LOCAL_IP: processor
+      MAX_OFFSETS_PER_TRIGGER: ${MAX_OFFSETS_PER_TRIGGER:-20000}
+    depends_on:
+      database-init: {condition: service_completed_successfully}
+      kafka: {condition: service_healthy}
+    volumes: [writer-secrets:/run/secrets:ro, datasets:/data]
+    tmpfs: ["/tmp:size=768m,mode=1777"]
+    healthcheck:
+      test: [CMD, python, scripts/check_processor.py]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 5
+    mem_limit: 5g
+    cpus: 2.5
+
+  api:
+    <<: *app
+    image: ${API_IMAGE:-data-horizon-api:local}
+    build: {context: ., dockerfile: services/api/Dockerfile}
+    environment:
+      <<: *environment
+      API_TOKEN_FILE: /run/secrets/api_token
+      PUBLIC_API_TOKEN_FILE: /run/secrets/public_api_token
+      PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://127.0.0.1:8000}
+      DASHBOARD_PUBLIC_URL: ${DASHBOARD_PUBLIC_URL:-http://127.0.0.1:8501}
+    depends_on:
+      database-init: {condition: service_completed_successfully}
+    volumes: [reader-secrets:/run/secrets:ro, datasets:/data:ro]
+    ports: [127.0.0.1:8000:8000]
+    mem_limit: 384m
+    cpus: 0.5
+
+  dashboard:
+    <<: *app
+    image: ${DASHBOARD_IMAGE:-data-horizon-ui:local}
+    build: {context: ., dockerfile: frontend/Dockerfile}
+    command: [node, server.js]
+    environment:
+      DATA_MODE: ${DATA_MODE:-live}
+      APP_ENV: ${APP_ENV:-development}
+      PUBLIC_API_TOKEN_FILE: /run/secrets/public_api_token
+      API_TOKEN_FILE: /run/service/api_token
+      API_BASE_URL: http://api:8000
+      PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://127.0.0.1:8000}
+      DASHBOARD_PUBLIC_URL: ${DASHBOARD_PUBLIC_URL:-http://127.0.0.1:8501}
+    depends_on:
+      api: {condition: service_healthy}
+    volumes: [public-ui-secrets:/run/secrets:ro, service-token-secrets:/run/service:ro]
+    ports: [127.0.0.1:8501:8501]
+    networks: [application]
+    tmpfs: ["/tmp:size=128m,mode=1777", "/app/.next/cache:size=64m,mode=1777"]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8501/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    mem_limit: 512m
+    cpus: 0.5
+
+
+  integration:
+    <<: *app
+    image: data-horizon-tests:local
+    build:
+      context: .
+      dockerfile: tools/operations/Dockerfile
+      target: tests
+    profiles: [test]
+    restart: "no"
+    environment:
+      DATA_MODE: synthetic
+      DATA_DIR: /tmp/test-data
+      TEST_DATABASE_URL_FILE: /run/secrets/test_database_url
+      RUN_INTEGRATION: "1"
+      API_BASE_URL: http://api:8000
+      API_TOKEN_FILE: /run/api-secret/api_token
+    depends_on:
+      database-init: {condition: service_completed_successfully}
+      kafka: {condition: service_healthy}
+    volumes: [migration-secrets:/run/secrets:ro, service-token-secrets:/run/api-secret:ro]
+    healthcheck: {disable: true}
+    mem_limit: 512m
+    cpus: 1
+
+  prometheus:
+    image: data-horizon-monitoring:local
+    build:
+      context: .
+      dockerfile: Dockerfile.monitoring
+    user: "10001:10001"
+    profiles: [monitoring]
+    command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=3d]
+    volumes: [prometheus-data:/prometheus, service-token-secrets:/run/secrets:ro]
+    networks: [application]
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    security_opt: [no-new-privileges:true]
+
+  benchmark:
+    <<: *app
+    profiles: [benchmark]
+    restart: "no"
+    command: [python, -m, data_horizon.benchmark]
+    environment:
+      <<: *environment
+      DATA_MODE: ${DATA_MODE:-live}
+      API_TOKEN_FILE: /run/secrets/api_token
+      API_BASE_URL: http://api:8000
+    volumes: [reader-secrets:/run/secrets:ro, datasets:/data]
+    healthcheck: {disable: true}
+    mem_limit: 512m
+    cpus: 0.5
+
+networks:
+  application: {}
+  backend: {}
+
+volumes:
+  datasets: {}
+  postgres-data: {}
+  kafka-data: {}
+  writer-secrets: {}
+  reader-secrets: {}
+  public-ui-secrets: {}
+  service-token-secrets: {}
+  migration-secrets: {}
+  postgres-secrets: {}
+  prometheus-data: {}

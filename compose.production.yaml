@@ -1,0 +1,108 @@
+# Use only after make production-check. Requires Compose >=2.24.4.
+services:
+  runtime-init:
+    image: ${OPS_IMAGE:?Set OPS_IMAGE to a tested immutable image digest}
+    pull_policy: always
+    environment: {APP_ENV: production}
+  database-init:
+    image: ${OPS_IMAGE:?Set OPS_IMAGE}
+    environment: {APP_ENV: production}
+  benchmark:
+    image: ${OPS_IMAGE:?Set OPS_IMAGE}
+    environment: {APP_ENV: production}
+  collector:
+    image: ${COLLECTOR_IMAGE:?Set COLLECTOR_IMAGE}
+    environment: {APP_ENV: production}
+  api:
+    image: ${API_IMAGE:?Set API_IMAGE}
+    environment:
+      APP_ENV: production
+      PUBLIC_API_BASE_URL: https://${DOMAIN:?Set a real DNS name}
+      DASHBOARD_PUBLIC_URL: https://${DOMAIN:?Set a real DNS name}
+    ports: !reset []
+  dashboard:
+    image: ${DASHBOARD_IMAGE:?Set DASHBOARD_IMAGE}
+    environment:
+      APP_ENV: production
+      PUBLIC_API_BASE_URL: https://${DOMAIN:?Set a real DNS name}
+      DASHBOARD_PUBLIC_URL: https://${DOMAIN:?Set a real DNS name}
+    ports: !reset []
+  postgres:
+    environment: {APP_ENV: production}
+    mem_limit: 3g
+    cpus: 2
+  db-roles:
+    environment: {APP_ENV: production}
+
+  kafka:
+    mem_limit: 3g
+    cpus: 2
+    environment:
+      KAFKA_HEAP_OPTS: -Xms1g -Xmx2g
+      KAFKA_LOG_RETENTION_HOURS: 72
+      KAFKA_LOG_RETENTION_BYTES: 10737418240
+  processor:
+    image: ${SPARK_IMAGE:?Set SPARK_IMAGE to a tested immutable image digest}
+    environment:
+      APP_ENV: production
+      SPARK_MASTER: spark://spark-master:7077
+      SPARK_DRIVER_MEMORY: 4g
+      SPARK_DRIVER_HOST: processor
+    depends_on:
+      spark-worker: {condition: service_started}
+    mem_limit: 6g
+    cpus: 2
+  spark-master:
+    image: ${SPARK_IMAGE:?Set SPARK_IMAGE}
+    command: [/usr/local/lib/python3.11/site-packages/pyspark/bin/spark-class, org.apache.spark.deploy.master.Master, --host, spark-master, --port, "7077", --webui-port, "8080"]
+    user: "10001:10001"
+    environment:
+      SPARK_LOCAL_IP: spark-master
+    networks: [backend]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:size=256m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck: {disable: true}
+    mem_limit: 512m
+    cpus: 0.5
+  spark-worker:
+    image: ${SPARK_IMAGE:?Set SPARK_IMAGE}
+    command: [/usr/local/lib/python3.11/site-packages/pyspark/bin/spark-class, org.apache.spark.deploy.worker.Worker, --host, spark-worker, --cores, "4", --memory, 10g, --work-dir, /tmp/spark-work, spark://spark-master:7077]
+    user: "10001:10001"
+    environment:
+      SPARK_LOCAL_IP: spark-worker
+    depends_on: [spark-master]
+    volumes: [datasets:/data]
+    networks: [backend]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:size=1g,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck: {disable: true}
+    mem_limit: 12g
+    cpus: 4
+  proxy:
+    image: data-horizon-proxy:local
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?Set a real DNS name}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [application]
+    depends_on:
+      api: {condition: service_healthy}
+      dashboard: {condition: service_healthy}
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    cpus: 0.5
+volumes:
+  caddy-data: {}
+  caddy-config: {}

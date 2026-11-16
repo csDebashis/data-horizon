@@ -1,0 +1,3 @@
+FROM prom/prometheus:v3.5.0
+COPY configs/monitoring/prometheus.yml /etc/prometheus/prometheus.yml
+USER 10001:10001
