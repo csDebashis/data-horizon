@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import json
 from pathlib import Path
 import re
 
-from .contracts import service_time
+from .contracts import service_time, timestamp
 from .store import dumps
 
 SUPPLEMENTED_URL = 'https://rrgtfsfeeds.s3.amazonaws.com/gtfs_supplemented.zip'
@@ -19,6 +19,10 @@ DAYS = ('monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sun
 # The complete stopping-path component is required. The origin and direction alone
 # cannot identify a published trip, particularly during changed service.
 CANONICAL_TRIP = re.compile(r'(?P<origin>[0-9]{6})_(?P<route>[1-6])\.\.(?P<direction>[NS])(?P<path>[A-Za-z0-9]+)')
+# NYC realtime trips appear about 30 minutes before origin. A six-hour past
+# boundary allows long/late subway trips without accepting another day's train.
+ORIGIN_LOOKAHEAD = timedelta(minutes=30)
+ORIGIN_LOOKBACK = timedelta(hours=6)
 
 
 def source_profile(url):
@@ -235,7 +239,40 @@ class ScheduleMatcher:
         return bool(weekly and weekly['start_date'] <= day <= weekly['end_date']
                     and weekly['weekdays'][parsed.weekday()])
 
-    def match(self, trip_id, stop_id, service_date, *, route_id=None, direction_id=None, remaining_stop_ids=None):
+    def effective_service_date(self, trip_id, service_date, *, reference_time=None):
+        """Resolve the verified MTA feed's overnight date convention conservatively.
+
+        A shortened ID may contain a 24-plus-hour origin while start_date names
+        the local departure day. Only its complete origin ID and source clock
+        can establish the GTFS service day. Arrival forecasts never choose it.
+        Already correct GTFS dates keep their original extended-hour meaning.
+        """
+        parsed = CANONICAL_TRIP.fullmatch(trip_id)
+        if self.source_profile != SOURCE_PROFILE or trip_id in self.exact or not parsed:
+            return service_date
+        origin = int(parsed['origin'])
+        day_offset = origin // 144000  # Hundredths of minutes in a complete day.
+        if not day_offset:
+            return service_date
+        if reference_time is None or not service_date:
+            return None
+        try:
+            reference = timestamp(reference_time)
+            source_day = date.fromisoformat(_iso_date(service_date))
+            hours, remainder = divmod(origin * 60 // 100, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            origin_time = f'{hours:02}:{minutes:02}:{seconds:02}'
+            possible = []
+            for day in (source_day, source_day - timedelta(days=day_offset)):
+                instant = service_time(day, origin_time)
+                if reference - ORIGIN_LOOKBACK <= instant <= reference + ORIGIN_LOOKAHEAD:
+                    possible.append(day.isoformat())
+            return possible[0] if len(possible) == 1 else None
+        except (ValueError, TypeError, AttributeError, OverflowError):
+            return None
+
+    def match(self, trip_id, stop_id, service_date, *, route_id=None, direction_id=None,
+              remaining_stop_ids=None, reference_time=None):
         literal = trip_id in self.exact
         candidates = [self.exact[trip_id]] if literal else self.suffix.get(trip_id, [])
         if not candidates:
@@ -248,6 +285,9 @@ class ScheduleMatcher:
                 or not remaining_stop_ids or parsed['route'] != str(route_id)
                 or trip_direction(trip_id) != str(direction_id)
             ):
+                return None, 'tentative'
+            service_date = self.effective_service_date(trip_id, service_date, reference_time=reference_time)
+            if service_date is None:
                 return None, 'tentative'
         if self.calendar is not None:
             if not service_date:
@@ -264,6 +304,14 @@ class ScheduleMatcher:
             return None, 'ambiguous' if candidates else 'unmatched'
         record = candidates[0]
         if canonical:
+            if int(parsed['origin']) >= 144000:
+                try:
+                    published_origin = service_time(service_date, record['stops'][0][2])
+                    reference = timestamp(reference_time)
+                    if not reference - ORIGIN_LOOKBACK <= published_origin <= reference + ORIGIN_LOOKAHEAD:
+                        return None, 'tentative'
+                except (ValueError, TypeError, AttributeError, IndexError, OverflowError):
+                    return None, 'tentative'
             stops = [row[1] for row in record['stops']]
             if len(set(remaining_stop_ids)) != len(remaining_stop_ids):
                 return None, 'ambiguous'

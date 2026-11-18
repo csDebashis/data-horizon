@@ -406,7 +406,8 @@ def decode_feed(content, settings, *, matcher=None, static_version=None, source_
         raise ValueError("Invalid GTFS-Realtime protobuf response") from exc
     if not feed.IsInitialized():
         raise ValueError("Incomplete GTFS-Realtime header")
-    event_time = timestamp(feed.header.timestamp) if feed.header.timestamp else utcnow()
+    feed_time = timestamp(feed.header.timestamp) if feed.header.timestamp else None
+    event_time = feed_time or utcnow()
     events = []
     alerts = []
     rejected = 0
@@ -423,6 +424,20 @@ def decode_feed(content, settings, *, matcher=None, static_version=None, source_
                 if trip.start_date
                 else local.date().isoformat()
             )
+            source_service_date = service_date if trip.start_date else None
+            reference_time = feed_time
+            if update.timestamp and feed_time is not None:
+                reference_time = timestamp(update.timestamp)
+                source_age = (feed_time - reference_time).total_seconds()
+                if not -30 <= source_age <= 6 * 60 * 60:
+                    # A contradictory trip clock cannot authorise a date shift.
+                    reference_time = None
+            if matcher:
+                effective_day = matcher.effective_service_date(
+                    trip.trip_id, source_service_date, reference_time=reference_time,
+                )
+                if effective_day is not None:
+                    service_date = effective_day
             if trip.schedule_relationship == 3 and not update.stop_time_update:
                 events.append(
                     TransitEvent(
@@ -445,11 +460,12 @@ def decode_feed(content, settings, *, matcher=None, static_version=None, source_
                     continue
                 scheduled, confidence = (
                     matcher.match(
-                        trip.trip_id, stop.stop_id, service_date if trip.start_date else None,
+                        trip.trip_id, stop.stop_id, source_service_date,
                         route_id=trip.route_id,
                         direction_id=str(trip.direction_id) if trip.HasField("direction_id")
                         else trip_direction(trip.trip_id),
                         remaining_stop_ids=[item.stop_id for item in update.stop_time_update],
+                        reference_time=reference_time,
                     )
                     if matcher
                     else (None, "unmatched")

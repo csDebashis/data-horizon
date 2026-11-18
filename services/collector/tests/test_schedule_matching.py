@@ -34,7 +34,8 @@ def archive(*, calendar=CALENDAR, exceptions=None, validity=None, trips=None, ti
             f'4,{service},{trip},{direction}\n' for trip, service, direction in trips),
         'stop_times.txt': 'trip_id,arrival_time,departure_time,stop_id,stop_sequence\n' + ''.join(
             f'{trip},{value},{value},{stop},{index}\n'
-            for trip, _, _ in trips for index, (stop, value) in enumerate(times, 1)),
+            for trip, _, _ in trips
+            for index, (stop, value) in enumerate(times[trip] if isinstance(times, dict) else times, 1)),
     }
     if calendar is not None:
         files['calendar.txt'] = calendar
@@ -248,3 +249,214 @@ def test_fresh_schema_mismatch_is_refreshed_immediately(schedule_context, monkey
     monkeypatch.setattr('data_horizon.collector.fetch', transport)
     refresh_static(store, settings, previous)
     assert calls == [URL] and store.get_metadata('static')['lookup_schema_version'] == 2
+
+
+OVERNIGHT_TRIP = '149900_4..N01R'
+OVERNIGHT_TIMES = [('A', '24:59:00'), ('B', '25:04:00'), ('C', '25:09:00')]
+
+
+def overnight_feed(*, source_day='20261120', header_time='2026-11-20T06:00:00+00:00',
+                   update_time=None, prediction_shift=0, cancelled=False, stops=('A', 'B', 'C')):
+    """The live defect: source start date is the local origin day, but ID is >24h."""
+    feed = gtfs.FeedMessage()
+    feed.header.gtfs_realtime_version = '2.0'
+    if header_time is not None:
+        feed.header.timestamp = int(datetime.fromisoformat(header_time).timestamp())
+    update = feed.entity.add(id='overnight').trip_update
+    update.trip.trip_id, update.trip.route_id, update.trip.start_date = OVERNIGHT_TRIP, '4', source_day
+    if update_time:
+        update.timestamp = int(datetime.fromisoformat(update_time).timestamp())
+    if cancelled:
+        update.trip.schedule_relationship = gtfs.TripDescriptor.CANCELED
+    else:
+        for stop, value in OVERNIGHT_TIMES:
+            if stop in stops:
+                update.stop_time_update.add(stop_id=stop).arrival.time = int(
+                    service_time('2026-11-19', value).timestamp()) + 30 + prediction_shift
+    return feed.SerializeToString()
+
+
+def overnight_matcher(schedule_context, **changes):
+    return matcher_for(schedule_context, trips=[('WK_' + OVERNIGHT_TRIP, 'weekday', '0')],
+                       times=OVERNIGHT_TIMES, **changes)[0]
+
+
+def test_overnight_native_start_date_does_not_match_tomorrow(schedule_context):
+    matcher = overnight_matcher(schedule_context)
+    events, _, quality = decode_feed(overnight_feed(), schedule_context[1], matcher=matcher)
+    assert quality['matched'] == 3
+    assert {event['service_date'] for event in events} == {'2026-11-19'}
+    rows = aggregate(events, as_of='2026-11-20T06:00:01+00:00')
+    assert all(row['delay_mean_seconds'] == 30 for row in rows)
+    assert all(row['rolling_5m_mean'] == 30 and row['rolling_30m_mean'] == 30 for row in rows)
+    assert all(event['time_basis'] == 'predicted' and event['observed_time'] is None for event in events)
+
+
+def test_overnight_calendar_uses_effective_day_before_filtering(schedule_context):
+    # Friday's exception must not hide the train belonging to Thursday's service.
+    matcher = overnight_matcher(schedule_context, exceptions='weekday,20261120,2\n')
+    events, _, quality = decode_feed(overnight_feed(), schedule_context[1], matcher=matcher)
+    assert quality['matched'] == 3
+    assert events[1]['scheduled_time'] == '2026-11-20T06:04:00Z'
+    # Conversely, Thursday's removal cannot be bypassed using Friday's service.
+    matcher = overnight_matcher(schedule_context, exceptions='weekday,20261119,2\n')
+    _, _, quality = decode_feed(overnight_feed(), schedule_context[1], matcher=matcher)
+    assert quality['matched'] == 0
+
+
+def test_overnight_already_correct_service_date_is_not_shifted_twice(schedule_context):
+    matcher = overnight_matcher(schedule_context)
+    events, _, quality = decode_feed(overnight_feed(source_day='20261119'), schedule_context[1], matcher=matcher)
+    assert quality['matched'] == 3
+    assert {event['service_date'] for event in events} == {'2026-11-19'}
+    assert events[1]['scheduled_time'] == '2026-11-20T06:04:00Z'
+
+
+@pytest.mark.parametrize('header_time,update_time', [
+    (None, None),
+    ('2026-11-22T06:00:00+00:00', None),
+    ('2026-11-19T06:00:00+00:00', None),
+    ('2026-11-20T06:00:00+00:00', '2026-11-21T06:00:00+00:00'),
+    ('2026-11-20T06:00:00+00:00', '2026-11-19T06:00:00+00:00'),
+])
+def test_overnight_missing_or_conflicting_source_clocks_do_not_supply_delay(
+    schedule_context, header_time, update_time,
+):
+    matcher = overnight_matcher(schedule_context)
+    events, _, quality = decode_feed(overnight_feed(header_time=header_time, update_time=update_time),
+                                     schedule_context[1], matcher=matcher)
+    assert quality['matched'] == 0
+    assert all(event['scheduled_time'] is None for event in events)
+
+
+def test_overnight_resolution_never_selects_nearest_forecast(schedule_context):
+    matcher = overnight_matcher(schedule_context)
+    baseline = decode_feed(overnight_feed(), schedule_context[1], matcher=matcher)[0]
+    shifted = decode_feed(overnight_feed(prediction_shift=86400), schedule_context[1], matcher=matcher)[0]
+    assert [event['scheduled_time'] for event in shifted] == [event['scheduled_time'] for event in baseline]
+    assert {event['service_date'] for event in shifted} == {'2026-11-19'}
+
+
+def test_overnight_small_early_forecasts_are_preserved(schedule_context):
+    matcher = overnight_matcher(schedule_context)
+    events, _, _ = decode_feed(overnight_feed(prediction_shift=-60), schedule_context[1], matcher=matcher)
+    assert all(row['delay_mean_seconds'] == -30 for row in aggregate(events, as_of='2026-11-20T06:00:01+00:00'))
+
+
+def test_overnight_cancellation_uses_same_effective_day_as_stop_updates(schedule_context):
+    matcher = overnight_matcher(schedule_context)
+    events = decode_feed(overnight_feed(), schedule_context[1], matcher=matcher)[0]
+    controls = decode_feed(overnight_feed(cancelled=True, header_time='2026-11-20T06:00:01+00:00'),
+                           schedule_context[1], matcher=matcher)[0]
+    assert controls[0]['service_date'] == '2026-11-19'
+    rows = aggregate(events + controls, as_of='2026-11-20T06:00:02+00:00')
+    assert rows and all(row['event_count'] == 0 and row['health_score'] is None for row in rows)
+
+
+def test_overnight_incomplete_path_and_other_profile_remain_ineligible(schedule_context):
+    matcher = overnight_matcher(schedule_context)
+    _, _, quality = decode_feed(overnight_feed(stops=('A', 'C')), schedule_context[1], matcher=matcher)
+    assert quality['matched'] == 0
+    store, settings = schedule_context
+    settings.static_url = REGULAR
+    matcher = overnight_matcher(schedule_context)
+    events, _, quality = decode_feed(overnight_feed(), settings, matcher=matcher)
+    assert quality['matched'] == 0
+    assert {event['service_date'] for event in events} == {'2026-11-20'}
+
+
+def test_overnight_direct_match_requires_source_clock(schedule_context):
+    matcher = overnight_matcher(schedule_context)
+    assert match(matcher, trip=OVERNIGHT_TRIP, day='2026-11-20') == (None, 'tentative')
+
+
+def test_overnight_decode_and_aggregate_have_independent_signed_and_headway_results(schedule_context):
+    # Published origins are 20 minutes apart; forecasts are 30s early and 90s late.
+    second_trip = '151900_4..N01R'
+    matcher, _ = matcher_for(
+        schedule_context,
+        trips=[('WK_' + OVERNIGHT_TRIP, 'weekday', '0'), ('WK_' + second_trip, 'weekday', '0')],
+        times={'WK_' + OVERNIGHT_TRIP: OVERNIGHT_TIMES,
+               'WK_' + second_trip: [('A', '25:19:00'), ('B', '25:24:00'), ('C', '25:29:00')]},
+    )
+    feed = gtfs.FeedMessage()
+    feed.ParseFromString(overnight_feed(prediction_shift=-60))
+    other = feed.entity.add(id='later-trip').trip_update
+    other.CopyFrom(feed.entity[0].trip_update)
+    other.trip.trip_id = second_trip
+    for stop in other.stop_time_update:
+        stop.arrival.time += 1320  # 1200 scheduled seconds + 120 difference in delay.
+    events, _, quality = decode_feed(feed.SerializeToString(), schedule_context[1], matcher=matcher)
+    assert quality['matched'] == 6
+    rows = aggregate(events, as_of='2026-11-20T06:00:01+00:00')
+    assert len(rows) == 3
+    for row in rows:
+        assert row['event_count'] == 2
+        assert row['delay_mean_seconds'] == 30
+        assert row['scheduled_headway_seconds'] == 1200
+        assert row['headway_seconds'] == 1320
+        assert row['headway_deviation'] == pytest.approx(0.1)
+        assert row['health_score'] == 94
+        assert row['anomaly'] is None
+        assert all(row[f'rolling_{minutes}m_mean'] == 30 for minutes in (5, 15, 30))
+
+
+@pytest.mark.parametrize('reference,expected', [
+    ('2026-11-20T05:28:59+00:00', 'tentative'),  # More than 30 minutes before origin.
+    ('2026-11-20T05:29:00+00:00', 'exact'),
+    ('2026-11-20T09:00:00+00:00', 'exact'),  # A late train must not become tomorrow's train.
+    ('2026-11-20T11:59:01+00:00', 'tentative'),  # More than six hours after origin.
+    ('2026-11-20T06:00:00', 'tentative'),
+    ('not-a-clock', 'tentative'),
+])
+def test_overnight_origin_must_fit_source_clock_without_forecast_matching(schedule_context, reference, expected):
+    matcher = overnight_matcher(schedule_context)
+    scheduled, confidence = matcher.match(
+        OVERNIGHT_TRIP, 'B', '2026-11-20', route_id='4', direction_id='0',
+        remaining_stop_ids=('A', 'B', 'C'), reference_time=reference,
+    )
+    assert confidence == expected
+    assert scheduled == ('2026-11-20T06:04:00+00:00' if expected == 'exact' else None)
+
+
+@pytest.mark.parametrize('trip,day,reference,value', [
+    ('153000_4..N01R', '2026-11-01', '2026-11-01T06:35:00+00:00', '25:30:00'),
+    ('159000_4..N01R', '2026-03-08', '2026-03-08T07:35:00+00:00', '26:30:00'),
+])
+def test_overnight_date_resolution_does_not_guess_dst_fold_or_nonexistent_time(
+    schedule_context, trip, day, reference, value,
+):
+    matcher, _ = matcher_for(schedule_context, trips=[('WK_' + trip, 'weekday', '0')],
+                             times=[('A', value), ('B', value), ('C', value)])
+    assert matcher.match(trip, 'B', day, route_id='4', direction_id='0',
+                         remaining_stop_ids=('A', 'B', 'C'), reference_time=reference)[1] != 'exact'
+
+
+def test_overnight_duplicate_published_candidates_remain_ambiguous(schedule_context):
+    matcher, _ = matcher_for(
+        schedule_context,
+        trips=[('ONE_' + OVERNIGHT_TRIP, 'weekday', '0'), ('TWO_' + OVERNIGHT_TRIP, 'weekday', '0')],
+        times=OVERNIGHT_TIMES,
+    )
+    _, _, quality = decode_feed(overnight_feed(), schedule_context[1], matcher=matcher)
+    assert quality['matched'] == 0
+
+
+def test_overnight_uses_validated_trip_clock_when_feed_contains_an_old_update(schedule_context):
+    matcher = overnight_matcher(schedule_context)
+    # Header is still within the broad 6h consistency boundary, but the trip
+    # update itself predates origin by too much to establish this service day.
+    _, _, quality = decode_feed(
+        overnight_feed(header_time='2026-11-20T06:00:00+00:00', update_time='2026-11-20T04:00:00+00:00'),
+        schedule_context[1], matcher=matcher,
+    )
+    assert quality['matched'] == 0
+
+
+def test_overnight_published_origin_must_agree_with_extended_id_day(schedule_context):
+    # The shortened suffix alone must not promote a record from a different
+    # origin-day convention into another approximately 24h comparison error.
+    matcher, _ = matcher_for(schedule_context, trips=[('WK_' + OVERNIGHT_TRIP, 'weekday', '0')],
+                             times=[('A', '00:59:00'), ('B', '01:04:00'), ('C', '01:09:00')])
+    _, _, quality = decode_feed(overnight_feed(), schedule_context[1], matcher=matcher)
+    assert quality['matched'] == 0
