@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { csv, number, localTime, localStamp, localise, series, validStationPoints } from '../lib/format.mjs';
+import { csv, number, localTime, localStamp, localise, series, lineSegments, readingAverage, validStationPoints } from '../lib/format.mjs';
 import { snapshotClock } from '../lib/live.mjs';
 import { displayPreferences, resolvedScheme, contrastRatio } from '../lib/display-preferences.mjs';
 import { requestSnapshot, query } from '../lib/client.ts';
@@ -36,6 +36,23 @@ test('charts average simultaneous readings and preserve absent measurements', ()
     { window_start: '2026-01-01T00:01:00Z', delay: null }], ['delay']);
   assert.equal(result[0].delay, 3);
   assert.equal(result[1].delay, null);
+});
+
+test('historical summaries average displayed readings without pretending to weight matched trains', () => {
+  const rows = [{ delay_mean_seconds: -60, event_count: 100 },
+    { delay_mean_seconds: 20, event_count: 1 }, { delay_mean_seconds: null, event_count: 50 }];
+  assert.equal(readingAverage(rows, 'delay_mean_seconds'), -20);
+  assert.equal(readingAverage([{ value: 0 }, { value: '' }, { value: Infinity }, { value: undefined }], 'value'), 0);
+  assert.equal(readingAverage([{ value: null }], 'value'), null);
+  assert.equal(readingAverage([], 'value'), null);
+});
+
+test('chart lines stop at missing measurements and keep valid signed and zero values', () => {
+  const rows = [{ time: 1, value: -2 }, { time: 2, value: 0 }, { time: 3, value: null },
+    { time: 4, value: 4 }, { time: 5, value: undefined }, { time: 6, value: 6 },
+    { time: 7, value: NaN }, { time: 8, value: Infinity }, { time: 9, value: null }];
+  assert.deepEqual(lineSegments(rows, 'value'), [[rows[0], rows[1]], [rows[3]], [rows[5]]]);
+  assert.deepEqual(lineSegments([{ time: 1, value: null }], 'value'), []);
 });
 
 test('station plot rejects missing and invalid coordinates but retains valid zero', () => {

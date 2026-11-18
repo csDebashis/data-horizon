@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Box, Button, Chip, Stack, TextField, Typography } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import { api, query, useApi } from '../lib/client';
-import { number, localTime } from '../lib/format.mjs';
+import { number, localTime, readingAverage } from '../lib/format.mjs';
 import { useSnapshotClock } from '../lib/useSnapshotClock';
 import { Choice, Heading, Loading, Problem, StationChoice } from './Controls';
 import { DataTable, Metrics, Panel, Row, StationPlot, TimeChart } from './DataViews';
@@ -12,11 +12,6 @@ import { usePageScope } from '../lib/page-refresh';
 import { routeFiltersFromHistory, routeHistoryState } from '../lib/route-state.mjs';
 import { healthPresentation } from '../lib/health.mjs';
 const twoColumns = { display: 'grid', gridTemplateColumns: { xs: 'minmax(0,1fr)', lg: 'repeat(2,minmax(0,1fr))' }, gap: 2.5 };
-function average(rows: Row[], key: string) {
-    const values = rows.map(row => row[key]).filter(value => value !== null && value !== undefined &&
-        value !== '' && Number.isFinite(Number(value))).map(Number);
-    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-}
 function LastValidHealth({ reading }: { reading: Row }) {
     if (reading.status !== 'last_valid') return null;
     return <Stack sx={{ mt: .75, gap: .25, color: 'warning.main', overflowWrap: 'anywhere' }} data-testid="last-valid-health">
@@ -36,6 +31,7 @@ export function Network({ routes, refresh }: {
     const stops = useApi<Row[]>(showStations ? '/stops?limit=2000' : null, refresh);
     const alertClock = useSnapshotClock(alerts.meta, alerts.receivedAt);
     const healthClock = useSnapshotClock(health.meta, health.receivedAt);
+    const anomalyClock = useSnapshotClock(anomalies.meta, anomalies.receivedAt);
     const reading = healthPresentation(health.data, health.receivedAt, healthClock.monotonicNow, healthClock.now_ms);
     if (health.loading)
         return <Loading label="Loading network information…"/>;
@@ -48,7 +44,7 @@ export function Network({ routes, refresh }: {
               caption: <LastValidHealth reading={reading}/> },
             { label: 'Routes covered', value: String(routes.length) },
             { label: 'Active service alerts', value: alertClock.stale ? 'Unavailable' : String((alerts.data || []).length) },
-            { label: 'Unusual route-stop readings', value: number(health.data?.anomaly_count) },
+            { label: 'Unusual route-stop readings', value: healthClock.stale ? 'Unavailable' : number(health.data?.anomaly_count) },
         ]}/>
     <Typography variant="caption" color="text.secondary">The health score is calculated from delay and train intervals. If inputs pause, an available last valid score is kept for up to five minutes with its original source time. No previous valid score means Unavailable. It is not an official MTA rating.</Typography>
     <Box sx={twoColumns}>
@@ -67,7 +63,11 @@ export function Network({ routes, refresh }: {
         {!routes.length && <Alert severity="info">Route information will appear after collection and processing.</Alert>}
       </Panel>
       <Panel title="Unusual readings" subtitle="Up to eight readings are shown here. The card above gives the full count.">
-        <DataTable rows={(anomalies.data || []).slice(0, 8)} columns={['route_id', 'stop_id', 'delay_mean_seconds', 'health_level']} title="Unusual readings" empty="No unusual readings are available. Missing data does not prove normal service."/>
+        <Stack sx={{ gap: 1.5 }}>
+          {anomalyClock.stale && <Alert severity="warning">Unusual-reading data is old or unavailable. Any rows below are last known readings.</Alert>}
+          <Typography variant="caption" color="text.secondary">Source updated: {localTime(anomalyClock.as_of)} · Age: {number(anomalyClock.freshness_seconds, ' seconds')}</Typography>
+          <DataTable rows={(anomalies.data || []).slice(0, 8)} columns={['route_id', 'stop_id', 'delay_mean_seconds', 'health_level']} title="Unusual readings" empty={anomalyClock.stale ? 'Current unusual-reading status is unavailable.' : 'No unusual readings are available. Missing data does not prove normal service.'}/>
+        </Stack>
       </Panel>
     </Box>
     <Panel title="Service alerts" subtitle="Public notices from the source feed, with up to 20 records shown.">
@@ -164,14 +164,15 @@ export function RouteDetails({ route, refresh }: { route: string; refresh: numbe
             <Typography variant="caption" color="text.secondary" data-testid="selection-context">Showing Route {route} · {name} · {rows.length} history records · local time</Typography>
             {rows.length ? <>
               <Metrics items={[
-                { label: 'Mean delay', value: number(average(rows, 'delay_mean_seconds'), ' seconds') },
-                { label: 'Mean headway', value: number(average(rows, 'headway_seconds'), ' seconds') },
-                { label: 'Mean health score', value: number(average(rows, 'health_score'), ' / 100') },
+                { label: 'Average timetable difference', value: number(readingAverage(rows, 'delay_mean_seconds'), ' seconds') },
+                { label: 'Average train interval', value: number(readingAverage(rows, 'headway_seconds'), ' seconds') },
+                { label: 'Average recorded health', value: number(readingAverage(rows, 'health_score'), ' / 100') },
               ]}/>
-              <Alert severity="info">Delay and scheduled headway need an exact timetable match. They show Unavailable when no exact match is available. Arrival-gap headway can still be shown. Feed predictions are estimates, not measured actual arrivals.</Alert>
+              <Typography variant="caption" color="text.secondary">Each displayed historical reading has equal weight in these averages. The same train may appear in more than one reading. These are summaries of recorded platform readings, not a train-level average or current route status.</Typography>
+              <Alert severity="info">Timetable difference compares the arrival time with an exact timetable match. Negative means earlier than the timetable; positive means later. Missing exact matches are Unavailable. Train intervals can still be shown. Feed predictions are estimates, not measured actual arrivals.</Alert>
               <Box sx={twoColumns}>
-                <Panel title="Delay trend" subtitle="Mean delay in seconds."><TimeChart rows={rows} fields={{ delay_mean_seconds: 'Mean delay' }} units="Delay (seconds)"/></Panel>
-                <Panel title="Train intervals" subtitle="Current headway compared with scheduled headway."><TimeChart rows={rows} fields={{ headway_seconds: 'Current headway', scheduled_headway_seconds: 'Scheduled headway' }} units="Headway (seconds)"/></Panel>
+                <Panel title="Timetable comparison" subtitle="Average platform readings at each snapshot time. Negative is earlier; positive is later."><TimeChart rows={rows} fields={{ delay_mean_seconds: 'Average timetable difference' }} units="Timetable difference (seconds)"/></Panel>
+                <Panel title="Train intervals" subtitle="Average recorded train interval compared with the scheduled interval at each snapshot time."><TimeChart rows={rows} fields={{ headway_seconds: 'Recorded interval', scheduled_headway_seconds: 'Scheduled interval' }} units="Headway (seconds)"/></Panel>
               </Box>
               <DataTable rows={rows} columns={['window_start', 'stop_id', 'direction_id', 'delay_mean_seconds', 'headway_seconds',
                 'scheduled_headway_seconds', 'health_score', 'health_level', 'time_basis', 'event_count']} title="Route analytics"/>
@@ -327,7 +328,7 @@ export function AboutDataHorizon() {
     <Panel title="How to use the pages">
       <DataTable download={false} title="Page guide" columns={['page', 'purpose']} rows={[
             { page: 'Network overview', purpose: 'Start with route health, unusual readings and service alerts.' },
-            { page: 'Route analysis', purpose: 'Choose a route and station. Compare delay and train intervals; download CSV records.' },
+            { page: 'Route analysis', purpose: 'Choose a route and station. Compare timetable differences and train intervals; download CSV records.' },
             { page: 'Graph and what-if', purpose: 'Enter a delay and see connected stations and directed paths.' },
             { page: 'Pipeline', purpose: 'Check source collection, invalid records, processing speed and Kafka lag.' },
         ]}/>

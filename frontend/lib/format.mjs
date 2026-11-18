@@ -27,6 +27,27 @@ export function localise(value, zone = viewerZone(), depth = 0) { if (depth > 20
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key.replace(/_utc$/i, '_local'), /timezone|time_zone/i.test(key) && typeof item === 'string' ? zone : localise(item, zone, depth + 1)])); return value; }
 export function csv(rows, columns, zone = viewerZone()) { const cell = value => { let prepared = localise(value, zone); let text = prepared === null || prepared === undefined ? '' : typeof prepared === 'object' ? JSON.stringify(prepared) : String(prepared); if (typeof prepared === 'string' && /^[=+\-@\t\r]/.test(text))
     text = "'" + text; return '"' + text.replaceAll('"', '""') + '"'; }; return [columns.map(cell).join(','), ...rows.map(row => columns.map(key => cell(row[key])).join(','))].join('\r\n'); }
+/** Historical snapshots have equal weight; event counts are not matched-delay counts. */
+export function readingAverage(rows, key) {
+    const values = rows.map(row => row[key]).filter(value => value !== null && value !== undefined &&
+        value !== '' && Number.isFinite(Number(value))).map(Number);
+    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+/** A missing measurement ends a line instead of implying a continuous observation. */
+export function lineSegments(rows, key) {
+    const segments = [];
+    let current = [];
+    for (const row of rows) {
+        if (typeof row[key] === 'number' && Number.isFinite(row[key])) {
+            current.push(row);
+        } else if (current.length) {
+            segments.push(current);
+            current = [];
+        }
+    }
+    if (current.length) segments.push(current);
+    return segments;
+}
 export function series(rows, fields) { const times = new Map(); for (const row of rows) {
     const t = Date.parse(row.window_start);
     if (!Number.isFinite(t))
