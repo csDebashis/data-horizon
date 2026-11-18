@@ -14,6 +14,8 @@ Data Horizon collects and analyses New York subway data for routes 1–6. It com
 
 Page data updates without a full-page reload. Times use the viewer’s local timezone. Source age and the last successful page fetch are shown separately. There is no end-user login; service keys stay between the application servers.
 
+Route history shows the difference from the timetable: a negative value means earlier and a positive value means later. Its average gives equal weight to each displayed reading, so it is not an average of individual train journeys. Missing readings leave gaps in charts. Overnight timetable matching checks the service day before calculating comparisons.
+
 ## Architecture
 
 ```text
