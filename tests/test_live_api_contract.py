@@ -84,9 +84,10 @@ def test_running_live_api_contract_and_removed_product_routes(record_testsuite_p
     def envelope(response):
         body = response.json()
         assert set(body) == {'data', 'meta'}
-        assert {'mode', 'as_of', 'freshness_seconds', 'stale', 'time_basis'} <= set(body['meta'])
+        assert {'mode', 'as_of', 'freshness_seconds', 'stale', 'time_basis', 'stale_after_seconds'} <= set(body['meta'])
         assert body['meta']['mode'] in {'live', 'recorded', 'synthetic'}
         assert isinstance(body['meta']['stale'], bool)
+        assert type(body['meta']['stale_after_seconds']) is int and body['meta']['stale_after_seconds'] > 0
         return body
 
     try:

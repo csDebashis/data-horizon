@@ -62,7 +62,7 @@ def assert_revision(body, path, revision, reads):
         "reads": reads,
         "data": {key: snapshot[key] for key in FIELDS},
         "meta": body["meta"],
-    } == {"reads": revision, "data": expected, "meta": expected}
+    } == {"reads": revision, "data": expected, "meta": {**expected, "stale_after_seconds": 120}}
 
 
 @pytest.mark.parametrize("path", ["/status", "/pipeline/status"])

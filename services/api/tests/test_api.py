@@ -71,12 +71,47 @@ def test_F010_TC01_success_envelope(client, path):
     response = client.get("/api/v1" + path)
     assert response.status_code == 200
     assert set(response.json()) == {"data", "meta"}
-    expected_meta = {"mode", "as_of", "freshness_seconds", "stale", "time_basis"}
+    expected_meta = {"mode", "as_of", "freshness_seconds", "stale", "time_basis", "stale_after_seconds"}
     if path == "/alerts":
-        expected_meta |= {"stale_after_seconds", "reason"}
+        expected_meta.add("reason")
     assert set(response.json()["meta"]) == expected_meta
     assert response.json()["meta"]["mode"] == "synthetic"
     assert response.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.parametrize("path", [
+    "/status", "/routes", "/stops", "/network/health", "/routes/1/metrics",
+    "/routes/1/coverage", "/anomalies", "/pipeline/status",
+])
+@pytest.mark.parametrize("condition", ["fresh", "expired", "missing"])
+def test_shared_result_metadata_uses_configured_freshness_budget(
+    isolated_data_dir, monkeypatch, path, condition,
+):
+    from data_horizon.collector import synthetic_static
+    from data_horizon.contracts import utcnow
+    from data_horizon.store import Store
+
+    monkeypatch.setenv("APP_ENV", "test")
+    store = Store()
+    store.settings.stale_seconds = 45
+    synthetic_static(store)
+    now = utcnow()
+    monkeypatch.setattr("data_horizon.store.utcnow", lambda: now)
+    source_time = None if condition == "missing" else (
+        now - timedelta(seconds=20 if condition == "fresh" else 46)
+    ).isoformat()
+    store.put_metadata("processing", {} if source_time is None else {
+        "as_of": source_time, "time_basis": "predicted",
+    })
+    response = integration_client(store, monkeypatch).get("/api/v1" + path)
+    assert response.status_code == 200
+    meta = response.json()["meta"]
+    assert meta["stale_after_seconds"] == 45
+    assert meta["stale"] is (condition != "fresh")
+    assert meta["as_of"] == source_time
+    assert meta["freshness_seconds"] == (
+        None if condition == "missing" else 20 if condition == "fresh" else 46
+    )
 
 
 @pytest.mark.case("F010-TC01")

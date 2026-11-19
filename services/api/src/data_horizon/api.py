@@ -223,6 +223,7 @@ def create_app(store: Any | None = None) -> FastAPI:
                 "mode": status.get("mode", os.getenv("DATA_MODE", "live")),
                 "as_of": status.get("as_of"),
                 "freshness_seconds": status.get("freshness_seconds"),
+                "stale_after_seconds": getattr(getattr(database(), "settings", None), "stale_seconds", 120),
                 "stale": bool(status.get("stale", True)),
                 "time_basis": status.get("time_basis", "mixed; inspect each record"),
             },
